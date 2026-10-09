@@ -1,0 +1,15 @@
+# Character pictures: not included (copyrighted characters stay private). See README.
+stand.png
+drink.png
+remind.png
+walk.png
+assets/
+
+# Build output
+build/
+dist/
+*.spec
+__pycache__/
+
+# Local settings
+hydrator_config.json
