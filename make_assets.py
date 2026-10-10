@@ -4,6 +4,7 @@ Input (in this folder):  stand.png, drink.png, remind.png   (character on a gree
 Output:                  assets/*.png
 Run:  python make_assets.py
 """
+import json
 import os
 
 import numpy as np
@@ -11,10 +12,12 @@ from PIL import Image, ImageOps
 from scipy import ndimage
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, "assets")
+SRC = os.path.join(HERE, "characters")    # characters/<name>/stand.png, drink.png, walk.png [, character.json]
+OUT = os.path.join(HERE, "assets")         # assets/<name>/...   (built frames, used by the app)
 STAND_H = 300       # on-screen height (px) of the standing character
 REMIND_H = 340      # on-screen height of the close-up reminder pose
 FRAMES_IN_SHEET = 6   # frames in walk.png
+DESPILL = False       # set per character from character.json ("despill": true)
 PAD = 24            # transparent margin so rotated frames are not clipped
 
 
@@ -42,6 +45,10 @@ def cut_out(path, sparkle_only=False):
     soft = np.clip(1 - (d - 12) / 40, 0, 1)
     alpha = np.where(near, np.minimum(alpha, soft), alpha)
     gs = np.where(near, np.minimum(g, np.maximum(r, b) + 6), g)
+    if DESPILL:           # green-screen light on skin/hair: pull green back on warm pixels (keeps green eyes, white socks)
+        warm = (r > 140) & (r - b > 25) & (alpha > 0)
+        gs = np.where(warm & (gs > 0.82 * r), 0.82 * r + (gs - 0.82 * r) * 0.10, gs)
+        b = np.where(warm & (b < 0.62 * r), 0.62 * r + (b - 0.62 * r) * 0.3, b)
     out = np.dstack([r, gs, b, alpha * 255]).astype(np.uint8)
     return Image.fromarray(out, "RGBA")
 
@@ -61,14 +68,14 @@ def finish(im):
     return im
 
 
-def save(name, im):
-    finish(im).save(os.path.join(OUT, name + ".png"))
-    finish(ImageOps.mirror(im)).save(os.path.join(OUT, name + "_l.png"))
+def save(out_dir, name, im):
+    finish(im).save(os.path.join(out_dir, name + ".png"))
+    finish(ImageOps.mirror(im)).save(os.path.join(out_dir, name + "_l.png"))
 
 
-def walk_frames(stand_scale_h):
+def walk_frames(src, stand_scale_h):
     """Slice walk.png (6 side-view frames in a row) into aligned transparent frames."""
-    im = cut_out(os.path.join(HERE, "walk.png"), sparkle_only=True)
+    im = cut_out(os.path.join(src, "walk.png"), sparkle_only=True)
     a = np.array(im.split()[3]) > 110
     lab, n = ndimage.label(a)
     sizes = ndimage.sum(a, lab, range(1, n + 1))
@@ -119,10 +126,17 @@ def walk_frames(stand_scale_h):
     return out
 
 
-def main():
-    os.makedirs(OUT, exist_ok=True)
-    stand, drink, remind = (cut_out(os.path.join(HERE, f + ".png")) for f in ("stand", "drink", "remind"))
+def build_character(name):
+    src, out_dir = os.path.join(SRC, name), os.path.join(OUT, name)
+    os.makedirs(out_dir, exist_ok=True)
+    meta = {}
+    if os.path.exists(os.path.join(src, "character.json")):
+        with open(os.path.join(src, "character.json"), encoding="utf-8") as f:
+            meta = json.load(f)
 
+    global DESPILL
+    DESPILL = bool(meta.get("despill", False))
+    stand, drink = (cut_out(os.path.join(src, f + ".png")) for f in ("stand", "drink"))
     box = union(bbox(stand), bbox(drink))
     scale = STAND_H / (box[3] - box[1])
     size = (round((box[2] - box[0]) * scale), STAND_H)
@@ -134,23 +148,28 @@ def main():
         return canvas
 
     s, dk = prep(stand), prep(drink)
-    foot = (s.width // 2, s.height)
-    save("stand", s)
-    save("stand_a", s.rotate(5, Image.BICUBIC, center=foot))
-    save("stand_b", s.rotate(-5, Image.BICUBIC, center=foot))
-    save("drink", dk)
+    save(out_dir, "stand", s)
+    save(out_dir, "drink", dk)
 
-    rb = bbox(remind)
-    rscale = REMIND_H / (rb[3] - rb[1])
-    r_im = remind.crop(rb).resize((round((rb[2] - rb[0]) * rscale), REMIND_H), Image.LANCZOS)
-    canvas = Image.new("RGBA", (r_im.width + 2 * PAD, r_im.height + PAD), (0, 0, 0, 0))
-    canvas.paste(r_im, (PAD, PAD))
-    save("remind", canvas)
-    if os.path.exists(os.path.join(HERE, "walk.png")):
-        for k, f in enumerate(walk_frames(STAND_H)):
-            save(f"walk{k}", f)
-    print("frames:", sorted(os.listdir(OUT)))
-    print("stand frame size:", s.size, " remind frame size:", canvas.size)
+    walk = []
+    if os.path.exists(os.path.join(src, "walk.png")):
+        for k, f in enumerate(walk_frames(src, STAND_H)):
+            save(out_dir, f"walk{k}", f)
+            if k not in meta.get("skip_walk", []):
+                walk.append(f"walk{k}")
+    with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
+        json.dump({"display": meta.get("name", name.replace("_", " ").title()), "walk": walk}, f)
+    print(f"{name}: stand {s.size}, {len(walk)} walk frames")
+
+
+def main():
+    os.makedirs(OUT, exist_ok=True)
+    names = [d for d in sorted(os.listdir(SRC))
+             if all(os.path.exists(os.path.join(SRC, d, f)) for f in ("stand.png", "drink.png"))] if os.path.isdir(SRC) else []
+    if not names:
+        print("No characters found. Put stand.png, drink.png and walk.png in characters/<name>/")
+    for name in names:
+        build_character(name)
 
 
 if __name__ == "__main__":

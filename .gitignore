@@ -1,8 +1,5 @@
 # Character pictures: not included (copyrighted characters stay private). See README.
-stand.png
-drink.png
-remind.png
-walk.png
+characters/
 assets/
 
 # Build output

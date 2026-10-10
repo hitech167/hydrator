@@ -35,17 +35,31 @@ os.makedirs(_cfg_dir, exist_ok=True)
 CONFIG = os.path.join(_cfg_dir, "hydrator_config.json")
 KEY = "#ff00ff"          # transparent colour key
 TICK_MS = 80
-WALK = tuple(f"walk{i}" for i in range(5))   # three-quarter walk, bottle hanging in his hand (walk5 is damaged by the watermark)
+WALK = ("stand",)         # replaced by the selected character's walk frames (see load_character)
 WALK_SPEED = 10.5            # px per tick while coming in / going out (matches the stride)
 WALK_FRAME_TICKS = 2      # ticks each walk frame is shown
 
 W, H = 320, 480          # replaced at start-up to fit the character images
 
 
-def asset(name):
-    """Path of a bundled picture (works from source and from the PyInstaller .exe)."""
+def asset(*parts):
+    """Path inside the bundled assets folder (works from source and from the PyInstaller .exe)."""
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, "assets", name)
+    return os.path.join(base, "assets", *parts)
+
+
+def list_characters():
+    """Folders in assets/ that contain a built character, as {folder: display name}."""
+    found = {}
+    root = asset()
+    for d in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        if os.path.exists(os.path.join(root, d, "stand.png")):
+            try:
+                with open(os.path.join(root, d, "meta.json"), encoding="utf-8") as f:
+                    found[d] = json.load(f).get("display", d)
+            except Exception:
+                found[d] = d
+    return found
 
 
 def work_area():
@@ -63,25 +77,18 @@ def work_area():
 class Hydrator:
     def __init__(self):
         self.root = tk.Tk()
-        if not os.path.exists(asset("stand.png")):
+        self.chars = list_characters()
+        if not self.chars:
             from tkinter import messagebox
-            messagebox.showerror("Hydrator", "Character pictures not found.\n\nAdd stand.png, drink.png and walk.png "
-                                 "(character on a green background) and run: python make_assets.py\n\nSee README.md.")
+            messagebox.showerror("Hydrator", "No characters found.\n\nPut stand.png, drink.png and walk.png "
+                                 "(character on a green background) in characters/<name>/ and run: "
+                                 "python make_assets.py\n\nSee README.md.")
             raise SystemExit(1)
         r = self.root
         r.overrideredirect(True)
         r.attributes("-topmost", True)
         r.configure(bg=KEY)
         r.attributes("-transparentcolor", KEY)
-
-        # character pictures (made by make_assets.py); *_l.png are the mirrored, left-facing versions
-        self.imgs = {}
-        for name in ("stand", "drink", *WALK):
-            self.imgs[name, 1] = tk.PhotoImage(file=asset(name + ".png"))
-            self.imgs[name, -1] = tk.PhotoImage(file=asset(name + "_l.png"))
-        global W, H
-        W = max(max(i.width() for i in self.imgs.values()) + 20, 310)   # also wide enough for the bubble
-        H = max(i.height() for i in self.imgs.values()) + 120   # room for the speech bubble
 
         wa = work_area()
         if wa:
@@ -92,6 +99,9 @@ class Hydrator:
 
         self.cfg = {"interval_min": 30, "drank_today": 0, "day": time.strftime("%Y-%m-%d")}
         self.load()
+
+        self.character = None
+        self.load_character(self.cfg.get("character") if self.cfg.get("character") in self.chars else next(iter(self.chars)))
 
         self.x = float(self.left - W)
         self.y = self.bottom - H
@@ -126,6 +136,29 @@ class Hydrator:
         self.start_tray()
         self.tick()
 
+    # ---------- characters ----------
+    def load_character(self, name):
+        """Load a character's pictures (assets/<name>/) and size the window to fit them."""
+        meta = {}
+        try:
+            with open(asset(name, "meta.json"), encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception:
+            pass
+        walk = tuple(meta.get("walk") or ()) or ("stand",)
+        imgs = {}
+        for n in ("stand", "drink", *walk):
+            # *_l.png are the mirrored, left-facing versions
+            imgs[n, 1] = tk.PhotoImage(file=asset(name, n + ".png"))
+            imgs[n, -1] = tk.PhotoImage(file=asset(name, n + "_l.png"))
+        global W, H, WALK
+        WALK, self.imgs, self.character = walk, imgs, name
+        W = max(max(i.width() for i in imgs.values()) + 20, 310)   # also wide enough for the bubble
+        H = max(i.height() for i in imgs.values()) + 120           # room for the speech bubble
+        if hasattr(self, "canvas"):
+            self.canvas.config(width=W, height=H)
+            self.y = self.bottom - H
+
     # ---------- persistence ----------
     def load(self):
         try:
@@ -159,23 +192,33 @@ class Hydrator:
         self.menu.add_separator()
         self.menu.add_command(label="Quit", command=self.quit)
 
+    def tray_image(self):
+        icon = Image.open(asset(self.character, "stand.png"))
+        icon = icon.crop((0, 0, icon.width, int(icon.width * 0.9)))      # head and shoulders
+        return icon.resize((64, 64), Image.LANCZOS)
+
     def start_tray(self):
         self.tray = None
         if pystray is None:
             return
         try:
-            icon = Image.open(asset("stand.png"))
-            icon = icon.crop((0, 0, icon.width, int(icon.width * 0.9)))      # head and shoulders
-            icon = icon.resize((64, 64), Image.LANCZOS)
+            icon = self.tray_image()
             def cmd(name, arg=None):              # pystray wants callbacks with exactly (icon, item)
                 return lambda _icon, _item: self.cmds.put((name, arg))
 
+            def is_current(c):
+                return lambda _item: self.cfg.get("character", self.character) == c
+
+            characters = pystray.Menu(*[
+                pystray.MenuItem(label, cmd("character", c), checked=is_current(c), radio=True)
+                for c, label in self.chars.items()])
             intervals = pystray.Menu(*[
                 pystray.MenuItem(f"{m} min" + ("  (test)" if m == 1 else ""), cmd("interval", m))
                 for m in (1, 15, 30, 45, 60, 90)])
             menu = pystray.Menu(
                 pystray.MenuItem(lambda _i: f"Glasses today: {self.cfg['drank_today']}", None, enabled=False),
                 pystray.MenuItem("Remind me now", cmd("now")),
+                pystray.MenuItem("Character", characters),
                 pystray.MenuItem("Remind every...", intervals),
                 pystray.MenuItem("Quit", cmd("quit")),
             )
@@ -308,12 +351,20 @@ class Hydrator:
             cmd, arg = self.cmds.get()
             if cmd == "interval":
                 self.set_interval(arg)
+            elif cmd == "character":
+                self.cfg["character"] = arg                  # applied below once he is hidden
+                self.save()
             elif cmd == "now":
                 self.start_nudge()
             elif cmd == "quit":
                 return self.quit()
 
         if self.state == "hidden":
+            want = self.cfg.get("character")
+            if want in self.chars and want != self.character:
+                self.load_character(want)
+                if self.tray:
+                    self.tray.icon = self.tray_image()
             if now >= self.next_due:
                 self.start_nudge()
             self.root.after(250, self.tick)
